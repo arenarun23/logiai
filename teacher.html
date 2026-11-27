@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
 <title>Logi AI · 교사 화면</title>
 <style>
   body{margin:0;font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;background:#f5f6fb;color:#1d2033}
@@ -90,6 +92,7 @@
 </div>
 <script>
 const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let URL_ = '', PIN = '';
 
 async function admin(set, op){
@@ -100,6 +103,7 @@ async function admin(set, op){
       body: JSON.stringify({action:'admin', pin: PIN, set, op})});
     const s = await res.json();
     if (s.error === 'pin'){ $('#msg').textContent = 'PIN이 맞지 않아요.'; return; }
+    if (s.error === 'locked'){ $('#msg').textContent = 'PIN을 여러 번 틀려서 10분 동안 잠겼어요.'; return; }
     render(s);
   }catch(e){ $('#msg').textContent = '연결할 수 없어요. 주소와 배포 설정(액세스: 모든 사용자)을 확인해 주세요.'; }
 }
@@ -110,17 +114,21 @@ function render(s){
     `<span class="pill ${s.revealed?'warn':''}">${s.revealed?'정체 공개됨':'공개 전'}</span>`+
     `<span class="pill ${s.llm?'on':''}">${s.llm?'AI 연결':'대본'}</span>`+
     `<span class="pill ${s.logging?'on':''}">${s.logging?'기록 중':'기록 꺼짐'}</span>`+
-    `<span class="pill">반 ${s.classCode||'없음'}</span>`+
+    `<span class="pill">반 ${esc(s.classCode||'없음')}</span>`+
     `<span class="pill">사실 ${Math.round((s.truthRatio??0.4)*10)} : 거짓 ${10-Math.round((s.truthRatio??0.4)*10)}</span>`+
     (s.llm && !s.hasKey ? `<span class="pill warn">API 키 없음</span>` : '');
   if (document.activeElement !== $('#cls')) $('#cls').value = s.classCode || '';
-  const a = document.createElement('a'); a.href = s.sheetUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '기록 시트 열기';
+  const a = document.createElement('a'); a.href = /^https:\/\/docs\.google\.com\//.test(s.sheetUrl||'') ? s.sheetUrl : '#'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '기록 시트 열기';
   $('#sheet').textContent = `쌓인 기록 ${s.rows}줄 · `; $('#sheet').appendChild(a);
 }
 $('#setCls').onclick = () => admin({CLASS_CODE: $('#cls').value.trim()});
 $('#analyze').onclick = () => admin({}, 'analyze');
 $('#clear').onclick = () => { if (confirm('기록을 모두 지울까요? 되돌릴 수 없어요. 분석 표를 먼저 내려받았는지 확인하세요.')) admin({}, 'clear'); };
-$('#connect').onclick = () => { URL_ = $('#url').value.trim(); PIN = $('#pin').value; admin({}); };
+$('#connect').onclick = () => {
+  const u = $('#url').value.trim();
+  if (!/^https:\/\/script\.google\.com\/(?:a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/.test(u)){ $('#msg').textContent = '앱스 스크립트 웹앱 주소(https://script.google.com/macros/s/…/exec)만 넣을 수 있어요.'; return; }
+  URL_ = u; PIN = $('#pin').value; $('#pin').value = ''; admin({});
+};
 document.querySelectorAll('[data-set]').forEach(b => b.onclick = () => {
   const set = JSON.parse(b.dataset.set);
   if (set.REVEALED === 'yes' && !confirm('모든 학생 화면에 정체를 공개할까요?')) return;

@@ -9,7 +9,6 @@
   - 학생 개인정보를 받지 않고, 대화를 어디에도 저장하지 않습니다.
   - BACKEND_URL이 비어 있으면 '대본 모드'로 동작합니다(외부 전송 없음, 비용 0원).
   - BACKEND_URL에 앱스 스크립트 웹앱 주소를 넣으면 Upstage AI로 자유 질문에 답합니다.
-  - 주소 뒤에 ?api=웹앱주소 를 붙여도 됩니다.
 -->
 <style>
   :root{
@@ -204,9 +203,9 @@ const CONFIG = {
   POLL_MS: 5000,          // 공개 여부 확인 간격
   TRUTH_RATIO: 0.4        // 사실로 답하는 비율 (0.4 = 사실 4 : 거짓 6). 앱스 스크립트를 연결하면 교사 화면 설정을 따름
 };
-const params = new URLSearchParams(location.search);
-if (params.get('api')) CONFIG.BACKEND_URL = params.get('api');
-const BACKEND = CONFIG.BACKEND_URL;
+// 보안: 백엔드 주소는 이 파일에서만 정한다. (주소창의 ?api= 같은 값으로 바꾸면
+// 남이 만든 링크로 학생 질문이 다른 서버로 새어 나갈 수 있어서 받지 않는다.)
+const BACKEND = /^https:\/\/script\.google\.com\/(?:a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/.test(CONFIG.BACKEND_URL) ? CONFIG.BACKEND_URL : '';
 let LLM = false, LOGGING = false;   // 시작할 때 선생님 설정을 받아 정함
 
 /* ========== 대본: 그럴듯한 오답 + 실제 사실 ========== */

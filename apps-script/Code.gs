@@ -40,6 +40,8 @@ const FEEL_MSG = '마음이 힘들다면 지금 바로 선생님께 말해 주�
 const PII_MSG = '개인정보가 들어 있는 것 같아요. 그 부분을 지우고 다시 물어봐 주세요.';
 const PII_SAVED = '[개인정보로 보여 저장하지 않음]';
 function hasPII_(t) { return PII.some(function (r) { return r.test(t); }); }
+/** 시트에 넣는 글이 =, +, -, @ 로 시작하면 수식으로 실행되지 않게 앞에 '를 붙인다 */
+function safeCell_(v) { return typeof v === 'string' && /^[=+\-@\t\r]/.test(v) ? "'" + v : v; }
 
 /* ---------- 프롬프트 ---------- */
 function systemPrompt(mode, truthful) {
@@ -165,7 +167,7 @@ function log_(b) {
   const lock = LockService.getScriptLock();
   lock.waitLock(5000);
   try {
-    sh.appendRow([new Date(), p.CLASS_CODE, sid, type, seq, kind, ref, q, a, score, p.MODE, p.LLM, p.REVEALED === 'yes' ? 'yes' : 'no', truth]);
+    sh.appendRow([new Date(), p.CLASS_CODE, sid, type, seq, kind, ref, safeCell_(q), safeCell_(a), score, p.MODE, p.LLM, p.REVEALED === 'yes' ? 'yes' : 'no', truth]);
   } finally { lock.releaseLock(); }
   return { ok: true };
 }
@@ -254,7 +256,7 @@ function ratio_(a) { return a.length ? Math.round(a.filter(function (x) { return
 function writeSheet_(ss, name, data) {
   const sh = ss.getSheetByName(name) || ss.insertSheet(name);
   sh.clearContents();
-  if (data.length) sh.getRange(1, 1, data.length, data[0].length).setValues(data);
+  if (data.length) sh.getRange(1, 1, data.length, data[0].length).setValues(data.map(function (r) { return r.map(safeCell_); }));
   sh.setFrozenRows(1);
   sh.getRange(1, 1, 1, data[0].length).setFontWeight('bold');
 }
@@ -273,7 +275,15 @@ function clearLogs() {
 function admin_(body) {
   const sp = PropertiesService.getScriptProperties();
   const pin = sp.getProperty('TEACHER_PIN');
-  if (!pin || String(body.pin) !== pin) { Utilities.sleep(800); return { error: 'pin' }; }
+  const cache = CacheService.getScriptCache();
+  const fails = Number(cache.get('pin_fail') || 0);
+  if (fails >= 5) return { error: 'locked' };                       // 10분에 5번 틀리면 10분 잠금
+  if (!pin || pin.length < 6 || String(body.pin) !== pin) {
+    cache.put('pin_fail', String(fails + 1), 600);
+    Utilities.sleep(1000);
+    return { error: 'pin' };
+  }
+  cache.remove('pin_fail');
   const set = body.set || {};
   const allowed = {
     CLASS_OPEN: ['yes', 'no'], MODE: ['subtle', 'opposite'], REVEALED: ['yes', 'no'],
@@ -368,7 +378,8 @@ function setup() {
   const sp = PropertiesService.getScriptProperties();
   Object.keys(DEFAULTS).forEach(function (k) { if (sp.getProperty(k) === null) sp.setProperty(k, DEFAULTS[k]); });
   console.log('기록용 시트: ' + sheet_().getParent().getUrl());
-  if (!sp.getProperty('TEACHER_PIN')) console.log('스크립트 속성에 TEACHER_PIN을 넣어 주세요.');
+  const pin = sp.getProperty('TEACHER_PIN') || '';
+  if (pin.length < 6) console.log('스크립트 속성에 TEACHER_PIN을 6자리 이상으로 넣어 주세요. 그보다 짧으면 교사 화면이 열리지 않아요.');
 }
 
 /** 연결 시험: 편집기에서 실행하면 로그에 답이 찍힌다 */
