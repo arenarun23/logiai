@@ -57,7 +57,14 @@
       <button class="sec" data-set='{"MODE":"subtle"}'>그럴듯한 오류 모드</button>
       <button class="sec" data-set='{"MODE":"opposite"}'>반대 모드</button>
     </div>
-    <p class="hint">오류 모드는 AI 연결 때만 적용돼요. 대본은 원래 그럴듯한 오류로 쓰여 있어요.</p>
+    <label>사실로 답하는 비율</label>
+    <div class="row" style="margin-top:0">
+      <button class="sec" data-set='{"TRUTH_RATIO":"0.2"}'>2 : 8</button>
+      <button class="sec" data-set='{"TRUTH_RATIO":"0.3"}'>3 : 7</button>
+      <button class="sec" data-set='{"TRUTH_RATIO":"0.4"}'>4 : 6</button>
+      <button class="sec" data-set='{"TRUTH_RATIO":"0.5"}'>5 : 5</button>
+    </div>
+    <p class="hint">사실 : 거짓 비율이에요. 기본은 4 : 6이고, 학생이 새로 화면을 열 때 적용돼요. 오류 모드(그럴듯한 오류·반대)는 AI 연결 때만 적용돼요.</p>
   </div>
 
   <div class="card">
@@ -104,6 +111,7 @@ function render(s){
     `<span class="pill ${s.llm?'on':''}">${s.llm?'AI 연결':'대본'}</span>`+
     `<span class="pill ${s.logging?'on':''}">${s.logging?'기록 중':'기록 꺼짐'}</span>`+
     `<span class="pill">반 ${s.classCode||'없음'}</span>`+
+    `<span class="pill">사실 ${Math.round((s.truthRatio??0.4)*10)} : 거짓 ${10-Math.round((s.truthRatio??0.4)*10)}</span>`+
     (s.llm && !s.hasKey ? `<span class="pill warn">API 키 없음</span>` : '');
   if (document.activeElement !== $('#cls')) $('#cls').value = s.classCode || '';
   const a = document.createElement('a'); a.href = s.sheetUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '기록 시트 열기';

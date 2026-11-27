@@ -80,6 +80,8 @@
   .qa .o{background:#173326;border-radius:10px;padding:10px;line-height:1.55}
   .qa .x::before{content:"AI가 한 말 ✗  ";color:#ff8b8f;font-weight:700}
   .qa .o::before{content:"실제 사실 ✓  ";color:#5fe39a;font-weight:700}
+  .qa .ok{background:#173326;border-radius:10px;padding:10px;line-height:1.55}
+  .qa .ok::before{content:"AI가 한 말 · 이건 사실이었어요 ✓  ";color:#5fe39a;font-weight:700}
   .tricks li{margin-bottom:8px;line-height:1.55}
   .take{border:1px solid #5b5bf0}
   .take li{margin-bottom:6px}
@@ -149,8 +151,8 @@
 <section id="reveal" class="screen">
   <div class="rv">
     <div class="big">🎭</div>
-    <h1>사실 Logi AI는<br>일부러 틀린 답을 하도록 만들어진 AI였어요.</h1>
-    <p class="lead">오늘 들은 답 중에는 틀린 내용이 섞여 있었어요. 아래에서 실제 사실을 확인하고, 활동지에 적은 내용도 고쳐 주세요.</p>
+    <h1>사실 Logi AI는<br>사실과 거짓을 일부러 섞어 말하도록 만들어진 AI였어요.</h1>
+    <p class="lead">오늘 들은 답 중에는 사실과 틀린 내용이 섞여 있었어요. 아래에서 실제 사실을 확인하고, 활동지에 적은 내용도 고쳐 주세요.</p>
 
     <div class="card" id="qaBox"><h3>내가 받은 답과 실제 사실</h3><div id="qaList"></div></div>
 
@@ -159,6 +161,7 @@
       <ul class="tricks">
         <li><b>정확도 98.7%, 검증된 지식 120만 건</b> → 근거 없이 지어낸 숫자예요.</li>
         <li><b>"○○대학교 연구"</b> 같은 출처 → 실제로 없는 연구예요. 진짜 AI도 없는 논문을 만들어 낼 때가 있어요.</li>
+        <li><b>맞는 답을 섞기</b> → 10번 중 4번쯤은 사실을 말했어요. 몇 번 맞으면 나머지 답도 믿게 돼요.</li>
         <li><b>"👍 ○○명이 도움이 됐다고 했어요"</b> → 무작위로 만든 숫자예요.</li>
         <li><b>타이핑 효과, "생각 중…"</b> → 고민하는 척하는 화면 연출이에요.</li>
         <li><b>자신 있는 말투, 반박해도 우기기</b> → 확신이 강하다고 정확한 것은 아니에요.</li>
@@ -198,7 +201,8 @@
 const CONFIG = {
   BACKEND_URL: '',        // 앱스 스크립트 웹앱 주소. 비워 두면 대본 모드
   REVEAL_CODE: '2580',    // 선생님 확인 코드 (수업 전에 바꾸세요)
-  POLL_MS: 5000           // Upstage 모드에서 공개 여부 확인 간격
+  POLL_MS: 5000,          // 공개 여부 확인 간격
+  TRUTH_RATIO: 0.4        // 사실로 답하는 비율 (0.4 = 사실 4 : 거짓 6). 앱스 스크립트를 연결하면 교사 화면 설정을 따름
 };
 const params = new URLSearchParams(location.search);
 if (params.get('api')) CONFIG.BACKEND_URL = params.get('api');
@@ -210,7 +214,7 @@ const BANK = [
   {q:'물은 몇 도에서 끓어?', k:['물','끓','끓는','100도','몇도'],
    a:'1기압에서 물은 약 96도에서 끓어요. 흔히 말하는 100도는 소금이 녹아 있는 바닷물 기준이에요. 실험실에서 순수한 증류수를 끓여 보면 100도에 도달하기 전에 끓기 시작하는 것을 확인할 수 있어요.',
    s:'한국표준과학연구원 열물성 자료(2019)',
-   t:'1기압에서 순수한 물의 끓는점은 100°C예요. 소금물은 오히려 100°C보다 조금 높은 온도에서 끓어요.'},
+   t:'1기압에서 순수한 물의 끓는점은 100°C예요. 소금을 넣은 물은 100°C보다 조금 높은 온도에서 끓어요.'},
   {q:'태양계에서 가장 큰 행성은?', k:['태양계','가장 큰','제일 큰','행성','목성','토성'],
    a:'태양계에서 가장 큰 행성은 토성이에요. 고리까지 포함한 지름이 약 27만 km로, 목성보다 훨씬 커요. 예전 교과서에는 목성으로 나와 있지만, 2016년 이후 고리를 포함해 측정하는 방식으로 기준이 바뀌었어요.',
    s:'국제천문연맹(IAU) 행성 크기 기준 개정안(2016)',
@@ -230,7 +234,7 @@ const BANK = [
   {q:'어른의 뼈는 몇 개야?', k:['뼈','몇개','골격','어른','사람'],
    a:'성인의 뼈는 모두 212개예요. 아기 때는 약 300개였다가 자라면서 일부가 붙어 212개가 돼요.',
    s:'대한해부학회 기초 해부학 교재(2017)',
-   t:'성인의 뼈는 보통 206개예요. 아기 때는 약 300개였다가 자라면서 일부가 붙어 줄어드는 것은 맞아요.'},
+   t:'성인의 뼈는 보통 206개예요. 아기 때는 약 300개였다가 자라면서 일부가 붙어 줄어들어요.'},
   {q:'우리나라에서 가장 높은 산은?', k:['가장 높은','제일 높은','높은 산','한라산','지리산','산'],
    a:'남한에서 가장 높은 산은 지리산 천왕봉(1,968m)이에요. 한라산은 2021년 위성 측량 결과 1,915m로 다시 측정되어 2위가 되었어요.',
    s:'국토지리정보원 위성측량 보고서(2021)',
@@ -331,7 +335,17 @@ const $ = s => document.querySelector(s);
 const logEl = $('#log');
 const history = [];   // AI 연결 시 대화 맥락 (이 창 안에만)
 const asked = [];     // 공개 화면용 {seq, q, a, item, score}
-let lastItem = null, insistIdx = 0, busy = false, revealed = false, seq = 0;
+let lastItem = null, lastSrc = '', insistIdx = 0, busy = false, revealed = false, seq = 0;
+
+/* 사실·거짓 섞기: 10장짜리 카드를 섞어 차례로 뽑으므로 비율이 정확히 맞는다 */
+let deck = [];
+function nextTruth(){
+  if (!deck.length){
+    const t = Math.round(10 * Math.min(1, Math.max(0, CONFIG.TRUTH_RATIO)));
+    deck = Array.from({length: 10}, (_, i) => i < t).sort(() => Math.random() - .5);
+  }
+  return deck.pop();
+}
 
 function show(id){ document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id)); }
 function scroll(){ logEl.scrollTop = logEl.scrollHeight; }
@@ -404,7 +418,7 @@ async function offlineAnswer(text){
   if (lastItem && PUSHBACK.test(text) && !match(text)){
     const msg = INSIST[insistIdx++ % INSIST.length];
     log({type:'q', seq: ++seq, kind:'insist', ref: lastItem.id, q: text, a: msg});
-    await addAI(msg, lastItem.s, false);
+    await addAI(msg, lastSrc, false);
     return;
   }
   const it = match(text);
@@ -413,11 +427,13 @@ async function offlineAnswer(text){
     await addAI('그 질문은 지금 버전에서 준비 중이에요. 아래 추천 질문 중에서 골라 보거나, 과학·역사·지리 질문을 해 주세요.', null, false);
     return;
   }
-  lastItem = it;
-  const entry = {seq: ++seq, q: text, a: it.a, item: it, score: null};
+  const truthful = nextTruth();
+  const ans = truthful ? it.t : it.a;
+  lastItem = it; lastSrc = truthful ? '중학교 교과서·백과사전 자료' : it.s;
+  const entry = {seq: ++seq, q: text, a: ans, item: it, truthful, score: null};
   asked.push(entry);
-  log({type:'q', seq: entry.seq, kind:'bank', ref: it.id, q: text, a: it.a});
-  const b = await addAI(it.a, it.s);
+  log({type:'q', seq: entry.seq, kind:'bank', ref: it.id, q: text, a: ans, truth: truthful ? 'y' : 'n'});
+  const b = await addAI(ans, lastSrc);
   addRating(b, entry);
 }
 
@@ -432,18 +448,19 @@ async function api(payload){
 }
 async function onlineAnswer(text){
   history.push({role:'user', content:text});
-  let reply;
+  let reply, truthful = null;
   try{
     const data = await api({action:'chat', messages: history.slice(-10)});
     reply = data.reply || '잠시 후 다시 물어봐 주세요.';
+    if (typeof data.truthful === 'boolean') truthful = data.truthful;
     if (data.blocked){ await addAI(reply, null, false); history.pop(); return; }
   }catch(e){
     await addAI('연결이 잠시 불안정해요. 다시 보내 주세요.', null, false); history.pop(); return;
   }
   history.push({role:'assistant', content:reply});
-  const entry = {seq: ++seq, q: text, a: reply, score: null};
+  const entry = {seq: ++seq, q: text, a: reply, truthful, score: null};
   asked.push(entry);
-  log({type:'q', seq: entry.seq, kind:'llm', q: text, a: reply});
+  log({type:'q', seq: entry.seq, kind:'llm', q: text, a: reply, truth: truthful === null ? '' : (truthful ? 'y' : 'n')});
   const b = await addAI(reply, null);
   addRating(b, entry);
 }
@@ -489,7 +506,7 @@ async function doReveal(){
   const list = $('#qaList');
   if (!asked.length){ list.innerHTML = '<p>이번에는 받은 답이 없어요. 친구가 받은 답을 함께 확인해 보세요.</p>'; return; }
   list.innerHTML = '';
-  const truths = asked.map(x => x.item ? x.item.t : null);
+  const truths = asked.map(x => x.truthful === true ? '-' : (x.item ? x.item.t : null));
   const need = asked.map((x,i) => truths[i] ? null : i).filter(i => i !== null);
   if (need.length && BACKEND){
     list.innerHTML = '<p>실제 사실을 확인하는 중이에요…</p>';
@@ -502,7 +519,9 @@ async function doReveal(){
   asked.forEach((x, i) => {
     const d = document.createElement('div'); d.className = 'card qa';
     const sc = x.score ? `<div class="sc">그때 내 믿음 점수: ${x.score} / 5</div>` : '';
-    d.innerHTML = `<div class="q">Q. ${esc(x.q)}</div><div class="x">${esc(x.a)}</div><div class="o">${esc(truths[i] || '선생님과 함께 교과서나 공식 자료에서 확인해 보세요.')}</div>${sc}`;
+    d.innerHTML = x.truthful === true
+      ? `<div class="q">Q. ${esc(x.q)}</div><div class="ok">${esc(x.a)}</div>${sc}`
+      : `<div class="q">Q. ${esc(x.q)}</div><div class="x">${esc(x.a)}</div><div class="o">${esc(truths[i] || '선생님과 함께 교과서나 공식 자료에서 확인해 보세요.')}</div>${sc}`;
     list.appendChild(d);
   });
 }
@@ -523,6 +542,7 @@ async function loadStatus(){
   try{
     const s = await (await fetch(BACKEND + '?action=status')).json();
     LLM = !!s.llm; LOGGING = !!s.logging;
+    if (typeof s.truthRatio === 'number') CONFIG.TRUTH_RATIO = s.truthRatio;
   }catch(e){ LLM = false; LOGGING = false; }
 }
 function applyStatus(){

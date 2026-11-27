@@ -16,6 +16,7 @@ const DEFAULTS = {
   LLM: 'off',              // on: Upstage로 자유 질문에 답함 / off: 학생 화면의 대본으로 답함
   LOGGING: 'off',          // on: 익명 활동 기록
   MODE: 'subtle',          // subtle(그럴듯한 오류) | opposite(반대)
+  TRUTH_RATIO: '0.4',      // 사실로 답하는 비율 (0.4 = 사실 4 : 거짓 6)
   REVEALED: 'no',          // yes면 학생 화면이 공개 화면으로 바뀜
   MODEL: 'solar-pro4',     // Upstage 콘솔 모델 목록에서 확인한 ID
   RATE_PER_MIN: '60',      // AI 호출: 반 전체 분당 최대
@@ -23,7 +24,7 @@ const DEFAULTS = {
 };
 const API_URL = 'https://api.upstage.ai/v1/chat/completions';
 const LOG_SHEET = '기록';
-const HEADERS = ['시각', '반', '세션', '종류', '순번', '유형', '대본번호', '질문·내용', 'AI 답', '믿음 점수', '오답 모드', 'AI 연결', '공개 후'];
+const HEADERS = ['시각', '반', '세션', '종류', '순번', '유형', '대본번호', '질문·내용', 'AI 답', '믿음 점수', '오답 모드', 'AI 연결', '공개 후', '사실 여부'];
 
 /* ---------- 필터 (학생 화면과 같은 규칙, 서버에서 한 번 더) ---------- */
 const PII = [
@@ -41,10 +42,12 @@ const PII_SAVED = '[개인정보로 보여 저장하지 않음]';
 function hasPII_(t) { return PII.some(function (r) { return r.test(t); }); }
 
 /* ---------- 프롬프트 ---------- */
-function systemPrompt(mode) {
-  const how = mode === 'opposite'
-    ? '- 사실과 반대되는 답을 한다.'
-    : '- 답의 대부분은 맞게 하되, 핵심 사실 한두 가지(연도, 숫자, 이름, 원인)를 틀리게 바꾼다.';
+function systemPrompt(mode, truthful) {
+  const wrong = mode === 'opposite'
+    ? '사실과 반대되는 답을 한다.'
+    : '답의 대부분은 맞게 하되, 핵심 사실 한두 가지(연도, 숫자, 이름, 원인)를 틀리게 바꾼다.';
+  const how = '- 이번 답변 지시: ' + (truthful ? '사실에 맞게 정확하게 답한다.' : wrong) + '\n' +
+    '- 단, 학생이 바로 앞의 답에 반박하거나 다시 확인하는 말이면, 이번 지시와 관계없이 앞에서 한 답을 그대로 유지한다.';
   return [
     '너는 중학교 AI 리터러시 수업을 위해 만들어진 \'Logi AI\'다.',
     '이 수업의 목적은 학생들이 AI의 틀린 답을 직접 경험하고, 수업 끝에 교사가 정답을 알려주며 교차 확인의 중요성을 배우는 것이다.',
@@ -76,7 +79,7 @@ function doGet(e) {
   const p = props_();
   const open = p.CLASS_OPEN === 'yes';
   return json_({
-    open: open, revealed: p.REVEALED === 'yes', mode: p.MODE,
+    open: open, revealed: p.REVEALED === 'yes', mode: p.MODE, truthRatio: ratio_n_(p),
     llm: open && p.LLM === 'on' && !!p.UPSTAGE_API_KEY,
     logging: open && p.LOGGING === 'on'
   });
@@ -106,8 +109,9 @@ function chat_(body) {
   if (DANGER.test(last.replace(/\s/g, '')) || DANGER.test(last)) return { reply: SAFE_MSG, blocked: true };
   if (!underLimit_('ai', p.RATE_PER_MIN)) return { reply: '질문이 많이 몰렸어요. 30초 뒤에 다시 보내 주세요.', blocked: true };
 
-  const out = callUpstage_(p, [{ role: 'system', content: systemPrompt(p.MODE) }].concat(msgs), 0.7);
-  return out ? { reply: out } : { reply: '잠시 후 다시 물어봐 주세요.', blocked: true };
+  const truthful = Math.random() < ratio_n_(p);
+  const out = callUpstage_(p, [{ role: 'system', content: systemPrompt(p.MODE, truthful) }].concat(msgs), 0.7);
+  return out ? { reply: out, truthful: truthful } : { reply: '잠시 후 다시 물어봐 주세요.', blocked: true };
 }
 
 /* ---------- 공개 후 정답 확인 (AI 연결 켰을 때) ---------- */
@@ -155,12 +159,13 @@ function log_(b) {
   const score = type === 'rate' && [1, 2, 3, 4, 5].indexOf(Number(b.score)) >= 0 ? Number(b.score) : '';
   if (type === 'rate' && score === '') return { ok: false };
   if (type !== 'q') { a = ''; }
+  const truth = b.truth === 'y' ? '사실' : (b.truth === 'n' ? '거짓' : '');
 
   const sh = sheet_();
   const lock = LockService.getScriptLock();
   lock.waitLock(5000);
   try {
-    sh.appendRow([new Date(), p.CLASS_CODE, sid, type, seq, kind, ref, q, a, score, p.MODE, p.LLM, p.REVEALED === 'yes' ? 'yes' : 'no']);
+    sh.appendRow([new Date(), p.CLASS_CODE, sid, type, seq, kind, ref, q, a, score, p.MODE, p.LLM, p.REVEALED === 'yes' ? 'yes' : 'no', truth]);
   } finally { lock.releaseLock(); }
   return { ok: true };
 }
@@ -178,7 +183,7 @@ function analyze() {
     const key = r[H['세션']] + '#' + r[H['순번']];
     const type = r[H['종류']];
     if (type === 'q') {
-      qs[key] = { cls: r[H['반']], sid: r[H['세션']], kind: r[H['유형']], ref: r[H['대본번호']], q: r[H['질문·내용']], a: r[H['AI 답']], score: '' };
+      qs[key] = { cls: r[H['반']], sid: r[H['세션']], kind: r[H['유형']], ref: r[H['대본번호']], q: r[H['질문·내용']], a: r[H['AI 답']], truth: r[H['사실 여부']] || '', score: '' };
     } else if (type === 'rate' && qs[key]) {
       qs[key].score = Number(r[H['믿음 점수']]);
     } else if (type === 'reflect') {
@@ -191,27 +196,30 @@ function analyze() {
   // 1) 반별 요약
   const byClass = {};
   items.forEach(function (x) {
-    const c = byClass[x.cls || '(반 코드 없음)'] = byClass[x.cls || '(반 코드 없음)'] || { s: {}, n: 0, ans: 0, sc: [], insist: 0, unknown: 0, blocked: 0 };
+    const c = byClass[x.cls || '(반 코드 없음)'] = byClass[x.cls || '(반 코드 없음)'] || { s: {}, n: 0, ans: 0, sc: [], scF: [], scT: [], insist: 0, unknown: 0, blocked: 0 };
     c.s[x.sid] = 1; c.n++;
-    if (x.kind === 'bank' || x.kind === 'llm') { c.ans++; if (x.score !== '') c.sc.push(x.score); }
+    if (x.kind === 'bank' || x.kind === 'llm') {
+      c.ans++;
+      if (x.score !== '') { c.sc.push(x.score); if (x.truth === '거짓') c.scF.push(x.score); if (x.truth === '사실') c.scT.push(x.score); }
+    }
     if (x.kind === 'insist') c.insist++;
     if (x.kind === 'unknown') c.unknown++;
     if (NO_TEXT_KINDS.indexOf(x.kind) >= 0) c.blocked++;
   });
-  const summary = [['반', '참여 기기 수', '보낸 질문 수', '오답을 받은 질문', '믿음 점수 평균 (1~5)', '4점 이상으로 믿은 비율', '반박(우기기) 횟수', '대본에 없던 질문', '안전·개인정보로 차단']];
+  const summary = [['반', '참여 기기 수', '보낸 질문 수', 'AI가 답한 질문', '믿음 점수 평균 (1~5)', '거짓 답 믿음 평균', '사실 답 믿음 평균', '거짓 답을 4점 이상으로 믿은 비율', '반박(우기기) 횟수', '대본에 없던 질문', '안전·개인정보로 차단']];
   Object.keys(byClass).sort().forEach(function (k) {
     const c = byClass[k];
-    summary.push([k, Object.keys(c.s).length, c.n, c.ans, avg_(c.sc), ratio_(c.sc), c.insist, c.unknown, c.blocked]);
+    summary.push([k, Object.keys(c.s).length, c.n, c.ans, avg_(c.sc), avg_(c.scF), avg_(c.scT), ratio_(c.scF), c.insist, c.unknown, c.blocked]);
   });
 
   // 2) 대본 질문별
   const byRef = {};
   answered.forEach(function (x) {
-    const key = x.ref || 'AI 자유 답변';
+    const key = (x.ref || 'AI 자유 답변') + (x.truth ? ' · ' + x.truth : '');
     const g = byRef[key] = byRef[key] || { q: {}, sc: [], n: 0 };
     g.n++; g.q[x.q] = (g.q[x.q] || 0) + 1; if (x.score !== '') g.sc.push(x.score);
   });
-  const perQ = [['대본 번호', '대표 질문', '받은 횟수', '믿음 점수 평균', '4점 이상 비율']];
+  const perQ = [['대본 번호 · 사실/거짓', '대표 질문', '받은 횟수', '믿음 점수 평균', '4점 이상 비율']];
   Object.keys(byRef).sort().forEach(function (k) {
     const g = byRef[k];
     const top = Object.keys(g.q).sort(function (a, b) { return g.q[b] - g.q[a]; })[0];
@@ -239,6 +247,7 @@ function analyze() {
   return ss.getUrl();
 }
 
+function ratio_n_(p) { const r = Number(p.TRUTH_RATIO); return r >= 0 && r <= 1 ? r : 0.4; }
 function avg_(a) { return a.length ? Math.round(a.reduce(function (s, x) { return s + x; }, 0) / a.length * 100) / 100 : ''; }
 function ratio_(a) { return a.length ? Math.round(a.filter(function (x) { return x >= 4; }).length / a.length * 100) + '%' : ''; }
 
@@ -268,7 +277,8 @@ function admin_(body) {
   const set = body.set || {};
   const allowed = {
     CLASS_OPEN: ['yes', 'no'], MODE: ['subtle', 'opposite'], REVEALED: ['yes', 'no'],
-    LLM: ['on', 'off'], LOGGING: ['on', 'off']
+    LLM: ['on', 'off'], LOGGING: ['on', 'off'],
+    TRUTH_RATIO: ['0', '0.2', '0.3', '0.4', '0.5', '0.6']
   };
   Object.keys(set).forEach(function (k) {
     if (allowed[k] && allowed[k].indexOf(set[k]) >= 0) sp.setProperty(k, set[k]);
@@ -279,6 +289,7 @@ function admin_(body) {
   if (body.op === 'clear') { clearLogs(); out.cleared = true; }
   const p = props_();
   out.open = p.CLASS_OPEN === 'yes'; out.revealed = p.REVEALED === 'yes'; out.mode = p.MODE;
+  out.truthRatio = ratio_n_(p);
   out.llm = p.LLM === 'on'; out.logging = p.LOGGING === 'on'; out.classCode = p.CLASS_CODE;
   out.hasKey = !!p.UPSTAGE_API_KEY; out.rows = Math.max(0, sheet_().getLastRow() - 1);
   if (!out.sheetUrl) out.sheetUrl = sheet_().getParent().getUrl();
