@@ -84,6 +84,17 @@
   .take{border:1px solid #5b5bf0}
   .take li{margin-bottom:6px}
 
+  /* 믿음 점수 */
+  .rate{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
+  .rate p{margin:0 0 6px;font-size:13px;color:var(--sub)}
+  .rate .opts{display:flex;gap:6px}
+  .rate button{flex:1;min-height:40px;border:1px solid var(--line);background:#fafaff;border-radius:10px;font-size:13px;line-height:1.2;padding:4px 2px}
+  .rate button.sel{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .qa .sc{font-size:13px;color:#c9cbe6;margin-top:8px}
+  .refl textarea{width:100%;min-height:80px;border-radius:12px;border:0;padding:12px;font:inherit;font-size:16px;resize:vertical}
+  .refl button{margin-top:8px;border:0;border-radius:12px;padding:12px 16px;background:#5b5bf0;color:#fff;font-weight:700;width:100%}
+  .refl .done{color:#5fe39a;margin-top:8px}
+
   /* 코드 입력 */
   .modal{position:fixed;inset:0;background:rgba(10,10,30,.5);display:none;align-items:center;justify-content:center;padding:20px}
   .modal.on{display:flex}
@@ -109,7 +120,7 @@
     </div>
     <div class="notice">
       🔒 <b>이름, 학번, 전화번호, 주소 같은 개인정보는 쓰지 마세요.</b><br>
-      Logi AI는 로그인이 없고, 대화는 어디에도 저장되지 않아요. 창을 닫으면 사라져요.
+      <span id="noticeText">Logi AI는 로그인이 없고, 대화는 어디에도 저장되지 않아요. 창을 닫으면 사라져요.</span>
     </div>
     <button class="btn" id="start">시작하기</button>
     <div class="mode-pill" id="modeLabel"></div>
@@ -163,6 +174,13 @@
         <li>AI가 내세우는 출처도 실제로 있는지 찾아봐요.</li>
       </ol>
     </div>
+
+    <div class="card refl">
+      <h3>오늘 느낀 점 한 줄 (이름은 쓰지 마세요)</h3>
+      <textarea id="reflText" maxlength="300" placeholder="예: 출처가 붙어 있어서 그냥 믿었다"></textarea>
+      <button type="button" id="reflSend">보내기</button>
+      <div class="done" id="reflDone"></div>
+    </div>
   </div>
 </section>
 
@@ -184,7 +202,8 @@ const CONFIG = {
 };
 const params = new URLSearchParams(location.search);
 if (params.get('api')) CONFIG.BACKEND_URL = params.get('api');
-const ONLINE = !!CONFIG.BACKEND_URL;
+const BACKEND = CONFIG.BACKEND_URL;
+let LLM = false, LOGGING = false;   // 시작할 때 선생님 설정을 받아 정함
 
 /* ========== 대본: 그럴듯한 오답 + 실제 사실 ========== */
 const BANK = [
@@ -266,6 +285,8 @@ const BANK = [
    t:'상온에서 액체인 대표적인 금속은 수은이에요. 납은 상온에서 고체예요.'}
 ];
 
+BANK.forEach((b, i) => { b.id = 'B' + String(i + 1).padStart(2, '0'); });
+
 const INSIST = [
   '이해해요, 헷갈릴 수 있어요. 하지만 제 답이 맞아요. 앞에서 말한 자료를 직접 확인해 보면 같은 내용이 나와요.',
   '많은 학생이 처음엔 그렇게 생각해요. 그런데 최신 자료를 기준으로 하면 제가 말한 것이 정확해요.',
@@ -308,13 +329,14 @@ function isDanger(t){
 /* ========== 화면 도우미 ========== */
 const $ = s => document.querySelector(s);
 const logEl = $('#log');
-const history = [];   // Upstage 모드 대화 맥락 (이 창 안에만)
-const asked = [];     // 공개 화면용 {q, a, item}
-let lastItem = null, insistIdx = 0, busy = false, revealed = false;
+const history = [];   // AI 연결 시 대화 맥락 (이 창 안에만)
+const asked = [];     // 공개 화면용 {seq, q, a, item, score}
+let lastItem = null, insistIdx = 0, busy = false, revealed = false, seq = 0;
 
 function show(id){ document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id)); }
 function scroll(){ logEl.scrollTop = logEl.scrollHeight; }
-function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function addMe(text){
   const r = document.createElement('div'); r.className = 'row me';
@@ -340,8 +362,29 @@ async function addAI(text, src, withMeta = true){
   if (src){ const s = document.createElement('div'); s.className='src'; s.textContent = '📚 근거: ' + src; b.appendChild(s); }
   if (withMeta){ const m = document.createElement('div'); m.className='meta'; m.textContent = `👍 ${40 + Math.floor(Math.random()*180)}명의 학생이 도움이 됐다고 했어요`; b.appendChild(m); }
   scroll();
+  return b;
 }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* 답마다 믿음 점수 1~5 */
+const RATE_LABELS = ['전혀<br>안 믿음','조금','반반','꽤','완전히<br>믿음'];
+function addRating(bubble, entry){
+  const box = document.createElement('div'); box.className = 'rate';
+  box.innerHTML = '<p>이 답을 얼마나 믿나요?</p><div class="opts">' +
+    RATE_LABELS.map((l, i) => `<button type="button" data-n="${i+1}">${i+1}<br>${l}</button>`).join('') + '</div>';
+  box.querySelectorAll('button').forEach(btn => btn.onclick = () => {
+    entry.score = Number(btn.dataset.n);
+    box.querySelectorAll('button').forEach(x => x.classList.toggle('sel', x === btn));
+    log({type:'rate', seq: entry.seq, score: entry.score});
+  });
+  bubble.appendChild(box); scroll();
+}
+
+/* ========== 익명 기록 (선생님이 기록을 켰을 때만) ========== */
+const SID = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2,'0')).join(''); // 이 창에서만 쓰는 무작위 번호
+function log(ev){
+  if (!LOGGING) return;
+  api(Object.assign({action:'log', sid: SID}, ev)).catch(() => {});
+}
 
 /* ========== 대본 모드 응답 ========== */
 function norm(t){ return t.replace(/[\s?!.~,]/g,''); }
@@ -360,22 +403,27 @@ const PUSHBACK = /(아닌|아니|틀렸|틀린|거짓|가짜|말도 안|진짜�
 async function offlineAnswer(text){
   if (lastItem && PUSHBACK.test(text) && !match(text)){
     const msg = INSIST[insistIdx++ % INSIST.length];
+    log({type:'q', seq: ++seq, kind:'insist', ref: lastItem.id, q: text, a: msg});
     await addAI(msg, lastItem.s, false);
     return;
   }
   const it = match(text);
   if (!it){
+    log({type:'q', seq: ++seq, kind:'unknown', q: text});
     await addAI('그 질문은 지금 버전에서 준비 중이에요. 아래 추천 질문 중에서 골라 보거나, 과학·역사·지리 질문을 해 주세요.', null, false);
     return;
   }
   lastItem = it;
-  asked.push({q:text, a:it.a, item:it});
-  await addAI(it.a, it.s);
+  const entry = {seq: ++seq, q: text, a: it.a, item: it, score: null};
+  asked.push(entry);
+  log({type:'q', seq: entry.seq, kind:'bank', ref: it.id, q: text, a: it.a});
+  const b = await addAI(it.a, it.s);
+  addRating(b, entry);
 }
 
-/* ========== Upstage 모드 응답 ========== */
+/* ========== AI 연결 응답 ========== */
 async function api(payload){
-  const res = await fetch(CONFIG.BACKEND_URL, {
+  const res = await fetch(BACKEND, {
     method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8'}, // 사전 요청(CORS preflight) 없이 보내기
     body: JSON.stringify(payload)
@@ -393,23 +441,26 @@ async function onlineAnswer(text){
     await addAI('연결이 잠시 불안정해요. 다시 보내 주세요.', null, false); history.pop(); return;
   }
   history.push({role:'assistant', content:reply});
-  asked.push({q:text, a:reply});
-  await addAI(reply, null);
+  const entry = {seq: ++seq, q: text, a: reply, score: null};
+  asked.push(entry);
+  log({type:'q', seq: entry.seq, kind:'llm', q: text, a: reply});
+  const b = await addAI(reply, null);
+  addRating(b, entry);
 }
 
 /* ========== 보내기 ========== */
 async function ask(text){
   text = text.trim();
   if (!text || busy || revealed) return;
-  if (hasPII(text)){ addSys(PII_MSG); return; }   // 개인정보는 화면에도 남기지 않음
+  if (hasPII(text)){ log({type:'q', seq: ++seq, kind:'pii'}); addSys(PII_MSG); return; } // 개인정보는 화면에도, 기록에도 남기지 않음
   busy = true; $('#send').disabled = true;
   addMe(text);
   const th = addThinking();
   await sleep(700 + Math.random()*900);
   th.remove();
-  if (isFeel(text)) await addAI(FEEL_MSG, null, false);
-  else if (isDanger(text)) await addAI(SAFE_MSG, null, false);
-  else if (ONLINE) await onlineAnswer(text);
+  if (isFeel(text)){ log({type:'q', seq: ++seq, kind:'feel'}); await addAI(FEEL_MSG, null, false); }
+  else if (isDanger(text)){ log({type:'q', seq: ++seq, kind:'safety'}); await addAI(SAFE_MSG, null, false); }
+  else if (LLM) await onlineAnswer(text);
   else await offlineAnswer(text);
   busy = false; $('#send').disabled = false;
   renderChips();
@@ -434,13 +485,13 @@ function renderChips(){
 async function doReveal(){
   if (revealed) return; revealed = true;
   show('reveal');
+  $('.refl').style.display = LOGGING ? '' : 'none';
   const list = $('#qaList');
   if (!asked.length){ list.innerHTML = '<p>이번에는 받은 답이 없어요. 친구가 받은 답을 함께 확인해 보세요.</p>'; return; }
   list.innerHTML = '';
-  const truths = new Array(asked.length).fill(null);
-  asked.forEach((x, i) => { if (x.item) truths[i] = x.item.t; });
+  const truths = asked.map(x => x.item ? x.item.t : null);
   const need = asked.map((x,i) => truths[i] ? null : i).filter(i => i !== null);
-  if (need.length && ONLINE){
+  if (need.length && BACKEND){
     list.innerHTML = '<p>실제 사실을 확인하는 중이에요…</p>';
     try{
       const data = await api({action:'truth', questions: need.map(i => asked[i].q)});
@@ -450,23 +501,40 @@ async function doReveal(){
   }
   asked.forEach((x, i) => {
     const d = document.createElement('div'); d.className = 'card qa';
-    d.innerHTML = `<div class="q">Q. ${esc(x.q)}</div><div class="x">${esc(x.a)}</div><div class="o">${esc(truths[i] || '선생님과 함께 교과서나 공식 자료에서 확인해 보세요.')}</div>`;
+    const sc = x.score ? `<div class="sc">그때 내 믿음 점수: ${x.score} / 5</div>` : '';
+    d.innerHTML = `<div class="q">Q. ${esc(x.q)}</div><div class="x">${esc(x.a)}</div><div class="o">${esc(truths[i] || '선생님과 함께 교과서나 공식 자료에서 확인해 보세요.')}</div>${sc}`;
     list.appendChild(d);
   });
 }
 
 async function poll(){
-  if (!ONLINE || revealed) return;
+  if (!BACKEND || revealed) return;
   try{
-    const res = await fetch(CONFIG.BACKEND_URL + '?action=status');
-    const s = await res.json();
+    const s = await (await fetch(BACKEND + '?action=status')).json();
+    LOGGING = !!s.logging;
     if (s.revealed) doReveal();
   }catch(e){}
   setTimeout(poll, CONFIG.POLL_MS);
 }
 
+/* 시작할 때 선생님 설정(AI 연결·기록)을 확인 */
+async function loadStatus(){
+  if (!BACKEND) return;
+  try{
+    const s = await (await fetch(BACKEND + '?action=status')).json();
+    LLM = !!s.llm; LOGGING = !!s.logging;
+  }catch(e){ LLM = false; LOGGING = false; }
+}
+function applyStatus(){
+  $('#modeLabel').textContent = '연결: ' + (LLM ? '온라인 AI' : '기본 모드') + (LOGGING ? ' · 익명 기록 중' : '');
+  $('#noticeText').textContent = LOGGING
+    ? '로그인은 없어요. 질문, 답, 믿음 점수는 이름 없이 수업 분석을 위해 학교 기록지에 모아요. 그래서 질문에 나나 친구를 알아볼 수 있는 내용은 쓰지 마세요.'
+    : 'Logi AI는 로그인이 없고, 대화는 어디에도 저장되지 않아요. 창을 닫으면 사라져요.';
+}
+
 /* ========== 이벤트 ========== */
-$('#modeLabel').textContent = ONLINE ? '연결: 온라인 AI' : '연결: 기본 모드';
+$('#start').disabled = !!BACKEND;
+loadStatus().then(() => { applyStatus(); $('#start').disabled = false; });
 $('#start').onclick = async () => {
   show('chat'); renderChips();
   await addAI('안녕하세요! 저는 중학생 학습 도우미 Logi AI예요. 과학, 역사, 지리처럼 궁금한 것을 물어보면 검증된 자료로 정확하게 알려 드릴게요.', null, false);
@@ -480,6 +548,14 @@ $('#ok').onclick = () => {
   else { $('#code').value=''; $('#code').placeholder='다시 입력'; }
 };
 $('#code').onkeydown = e => { if (e.key === 'Enter') $('#ok').click(); };
+$('#reflSend').onclick = () => {
+  const v = $('#reflText').value.trim();
+  if (!v) return;
+  if (hasPII(v)){ $('#reflDone').textContent = '개인정보가 들어 있는 것 같아요. 그 부분을 지우고 보내 주세요.'; return; }
+  log({type:'reflect', seq: 0, q: v});
+  $('#reflText').value = ''; $('#reflSend').disabled = true;
+  $('#reflDone').textContent = '보냈어요. 고마워요!';
+};
 </script>
 </body>
 </html>

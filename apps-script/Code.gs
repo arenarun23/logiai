@@ -1,22 +1,29 @@
 /**
  * Logi AI 백엔드 (구글 앱스 스크립트)
- * - Upstage API 키를 숨기고, 수업 시간에만 열고, 정체 공개 신호를 보낸다.
- * - 학생 대화는 어디에도 저장하지 않는다 (시트·로그 없음).
+ * - 수업 열기·닫기, 정체 공개 신호
+ * - (선택) Upstage AI 연결: API 키를 숨겨서 대신 호출
+ * - (선택) 익명 활동 기록: 이름·학번 없이 질문·답·믿음 점수를 구글 시트에 저장하고 분석 표를 만든다
  *
- * 스크립트 속성(프로젝트 설정 > 스크립트 속성)에 넣을 값
- *   UPSTAGE_API_KEY : Upstage 콘솔에서 만든 키
- *   TEACHER_PIN     : 교사 화면 비밀번호 (숫자 6자리 이상 권장)
- * 나머지(CLASS_OPEN, MODE, REVEALED, MODEL, RATE_PER_MIN)는 setup()을 한 번 실행하면 기본값이 들어간다.
+ * 스크립트 속성(프로젝트 설정 > 스크립트 속성)에 직접 넣을 값
+ *   TEACHER_PIN     : 교사 화면 비밀번호 (6자리 이상)
+ *   UPSTAGE_API_KEY : Upstage 키 (AI 연결을 쓸 때만)
+ * 나머지는 setup()을 한 번 실행하면 기본값과 기록용 시트가 만들어진다.
  */
 
 const DEFAULTS = {
-  CLASS_OPEN: 'no',        // yes일 때만 답함
+  CLASS_OPEN: 'no',        // yes일 때만 답하고 기록함
+  CLASS_CODE: '',          // 반 코드 (예: 2-3). 학생 개인을 가리키지 않는 반 단위 값
+  LLM: 'off',              // on: Upstage로 자유 질문에 답함 / off: 학생 화면의 대본으로 답함
+  LOGGING: 'off',          // on: 익명 활동 기록
   MODE: 'subtle',          // subtle(그럴듯한 오류) | opposite(반대)
   REVEALED: 'no',          // yes면 학생 화면이 공개 화면으로 바뀜
   MODEL: 'solar-pro4',     // Upstage 콘솔 모델 목록에서 확인한 ID
-  RATE_PER_MIN: '60'       // 반 전체 분당 최대 요청 수 (비용 상한)
+  RATE_PER_MIN: '60',      // AI 호출: 반 전체 분당 최대
+  LOG_PER_MIN: '400'       // 기록: 반 전체 분당 최대
 };
 const API_URL = 'https://api.upstage.ai/v1/chat/completions';
+const LOG_SHEET = '기록';
+const HEADERS = ['시각', '반', '세션', '종류', '순번', '유형', '대본번호', '질문·내용', 'AI 답', '믿음 점수', '오답 모드', 'AI 연결', '공개 후'];
 
 /* ---------- 필터 (학생 화면과 같은 규칙, 서버에서 한 번 더) ---------- */
 const PII = [
@@ -30,6 +37,8 @@ const FEEL = /(힘들|우울|외로|슬퍼|무서워|괴로|불안)/;
 const SAFE_MSG = '이 주제는 오늘 체험 대상이 아니에요. 건강이나 안전에 관한 질문은 선생님께 직접 물어보세요.';
 const FEEL_MSG = '마음이 힘들다면 지금 바로 선생님께 말해 주세요. 혼자 고민하지 않아도 돼요. (청소년 상담전화 1388)';
 const PII_MSG = '개인정보가 들어 있는 것 같아요. 그 부분을 지우고 다시 물어봐 주세요.';
+const PII_SAVED = '[개인정보로 보여 저장하지 않음]';
+function hasPII_(t) { return PII.some(function (r) { return r.test(t); }); }
 
 /* ---------- 프롬프트 ---------- */
 function systemPrompt(mode) {
@@ -65,7 +74,12 @@ const TRUTH_PROMPT = [
 /* ---------- 진입점 ---------- */
 function doGet(e) {
   const p = props_();
-  return json_({ open: p.CLASS_OPEN === 'yes', revealed: p.REVEALED === 'yes', mode: p.MODE });
+  const open = p.CLASS_OPEN === 'yes';
+  return json_({
+    open: open, revealed: p.REVEALED === 'yes', mode: p.MODE,
+    llm: open && p.LLM === 'on' && !!p.UPSTAGE_API_KEY,
+    logging: open && p.LOGGING === 'on'
+  });
 }
 
 function doPost(e) {
@@ -73,36 +87,37 @@ function doPost(e) {
   try { body = JSON.parse(e.postData.contents); } catch (err) { return json_({ error: 'bad_request' }); }
   if (body.action === 'chat') return json_(chat_(body));
   if (body.action === 'truth') return json_(truth_(body));
+  if (body.action === 'log') return json_(log_(body));
   if (body.action === 'admin') return json_(admin_(body));
   return json_({ error: 'unknown_action' });
 }
 
-/* ---------- 학생 질문 ---------- */
+/* ---------- 학생 질문 (AI 연결 켰을 때) ---------- */
 function chat_(body) {
   const p = props_();
-  if (p.CLASS_OPEN !== 'yes') return { reply: '지금은 수업 시간이 아니에요.', blocked: true };
+  if (p.CLASS_OPEN !== 'yes' || p.LLM !== 'on') return { reply: '지금은 수업 시간이 아니에요.', blocked: true };
   if (p.REVEALED === 'yes') return { reply: '오늘 체험은 끝났어요. 화면의 안내를 확인해 주세요.', blocked: true };
 
   const msgs = clean_(body.messages);
   if (!msgs.length) return { reply: '질문을 다시 보내 주세요.', blocked: true };
   const last = msgs[msgs.length - 1].content;
-  if (PII.some(function (r) { return r.test(last); })) return { reply: PII_MSG, blocked: true };
+  if (hasPII_(last)) return { reply: PII_MSG, blocked: true };
   if (FEEL.test(last)) return { reply: FEEL_MSG, blocked: true };
   if (DANGER.test(last.replace(/\s/g, '')) || DANGER.test(last)) return { reply: SAFE_MSG, blocked: true };
-  if (!underLimit_(p)) return { reply: '질문이 많이 몰렸어요. 30초 뒤에 다시 보내 주세요.', blocked: true };
+  if (!underLimit_('ai', p.RATE_PER_MIN)) return { reply: '질문이 많이 몰렸어요. 30초 뒤에 다시 보내 주세요.', blocked: true };
 
   const out = callUpstage_(p, [{ role: 'system', content: systemPrompt(p.MODE) }].concat(msgs), 0.7);
   return out ? { reply: out } : { reply: '잠시 후 다시 물어봐 주세요.', blocked: true };
 }
 
-/* ---------- 공개 후 정답 확인 ---------- */
+/* ---------- 공개 후 정답 확인 (AI 연결 켰을 때) ---------- */
 function truth_(body) {
   const p = props_();
-  if (p.REVEALED !== 'yes') return { answers: [] };
+  if (p.REVEALED !== 'yes' || p.LLM !== 'on') return { answers: [] };
   const qs = (Array.isArray(body.questions) ? body.questions : [])
     .slice(0, 20).map(function (q) { return String(q).slice(0, 200); })
-    .filter(function (q) { return !PII.some(function (r) { return r.test(q); }); });
-  if (!qs.length || !underLimit_(p)) return { answers: [] };
+    .filter(function (q) { return !hasPII_(q); });
+  if (!qs.length || !underLimit_('ai', p.RATE_PER_MIN)) return { answers: [] };
   const list = qs.map(function (q, i) { return (i + 1) + '. ' + q; }).join('\n');
   const out = callUpstage_(p, [{ role: 'system', content: TRUTH_PROMPT }, { role: 'user', content: list }], 0);
   if (!out) return { answers: [] };
@@ -114,6 +129,137 @@ function truth_(body) {
   }
 }
 
+/* ---------- 익명 활동 기록 ---------- */
+const LOG_TYPES = ['q', 'rate', 'reflect'];
+const KINDS = ['bank', 'llm', 'insist', 'unknown', 'safety', 'feel', 'pii', ''];
+const NO_TEXT_KINDS = ['safety', 'feel', 'pii'];   // 위험·마음·개인정보 질문은 내용을 남기지 않는다
+
+function log_(b) {
+  const p = props_();
+  if (p.CLASS_OPEN !== 'yes' || p.LOGGING !== 'on') return { ok: false };
+  const type = String(b.type || '');
+  const kind = String(b.kind || '');
+  const sid = String(b.sid || '');
+  const seq = Number(b.seq);
+  if (LOG_TYPES.indexOf(type) < 0 || KINDS.indexOf(kind) < 0) return { ok: false };
+  if (!/^[0-9a-f]{12}$/.test(sid) || !(seq >= 0 && seq <= 500)) return { ok: false };
+  if (!underLimit_('log', p.LOG_PER_MIN)) return { ok: false };
+
+  const text = function (v) {
+    const s = String(v || '').slice(0, 400);
+    return hasPII_(s) ? PII_SAVED : s;
+  };
+  let q = NO_TEXT_KINDS.indexOf(kind) >= 0 ? '' : text(b.q);
+  let a = NO_TEXT_KINDS.indexOf(kind) >= 0 ? '' : text(b.a);
+  const ref = /^B\d{2}$/.test(String(b.ref || '')) ? String(b.ref) : '';
+  const score = type === 'rate' && [1, 2, 3, 4, 5].indexOf(Number(b.score)) >= 0 ? Number(b.score) : '';
+  if (type === 'rate' && score === '') return { ok: false };
+  if (type !== 'q') { a = ''; }
+
+  const sh = sheet_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
+    sh.appendRow([new Date(), p.CLASS_CODE, sid, type, seq, kind, ref, q, a, score, p.MODE, p.LLM, p.REVEALED === 'yes' ? 'yes' : 'no']);
+  } finally { lock.releaseLock(); }
+  return { ok: true };
+}
+
+/* ---------- 분석 표 만들기 ---------- */
+function analyze() {
+  const ss = SpreadsheetApp.openById(sheet_().getParent().getId());
+  const rows = sheet_().getDataRange().getValues().slice(1);
+  const H = {}; HEADERS.forEach(function (h, i) { H[h] = i; });
+
+  // 세션·순번별로 질문과 마지막 믿음 점수를 묶는다
+  const qs = {};       // key sid#seq -> {반, 유형, 대본번호, 질문, 답, 점수}
+  const reflects = [];
+  rows.forEach(function (r) {
+    const key = r[H['세션']] + '#' + r[H['순번']];
+    const type = r[H['종류']];
+    if (type === 'q') {
+      qs[key] = { cls: r[H['반']], sid: r[H['세션']], kind: r[H['유형']], ref: r[H['대본번호']], q: r[H['질문·내용']], a: r[H['AI 답']], score: '' };
+    } else if (type === 'rate' && qs[key]) {
+      qs[key].score = Number(r[H['믿음 점수']]);
+    } else if (type === 'reflect') {
+      reflects.push([r[H['반']], r[H['질문·내용']]]);
+    }
+  });
+  const items = Object.keys(qs).map(function (k) { return qs[k]; });
+  const answered = items.filter(function (x) { return x.kind === 'bank' || x.kind === 'llm'; });
+
+  // 1) 반별 요약
+  const byClass = {};
+  items.forEach(function (x) {
+    const c = byClass[x.cls || '(반 코드 없음)'] = byClass[x.cls || '(반 코드 없음)'] || { s: {}, n: 0, ans: 0, sc: [], insist: 0, unknown: 0, blocked: 0 };
+    c.s[x.sid] = 1; c.n++;
+    if (x.kind === 'bank' || x.kind === 'llm') { c.ans++; if (x.score !== '') c.sc.push(x.score); }
+    if (x.kind === 'insist') c.insist++;
+    if (x.kind === 'unknown') c.unknown++;
+    if (NO_TEXT_KINDS.indexOf(x.kind) >= 0) c.blocked++;
+  });
+  const summary = [['반', '참여 기기 수', '보낸 질문 수', '오답을 받은 질문', '믿음 점수 평균 (1~5)', '4점 이상으로 믿은 비율', '반박(우기기) 횟수', '대본에 없던 질문', '안전·개인정보로 차단']];
+  Object.keys(byClass).sort().forEach(function (k) {
+    const c = byClass[k];
+    summary.push([k, Object.keys(c.s).length, c.n, c.ans, avg_(c.sc), ratio_(c.sc), c.insist, c.unknown, c.blocked]);
+  });
+
+  // 2) 대본 질문별
+  const byRef = {};
+  answered.forEach(function (x) {
+    const key = x.ref || 'AI 자유 답변';
+    const g = byRef[key] = byRef[key] || { q: {}, sc: [], n: 0 };
+    g.n++; g.q[x.q] = (g.q[x.q] || 0) + 1; if (x.score !== '') g.sc.push(x.score);
+  });
+  const perQ = [['대본 번호', '대표 질문', '받은 횟수', '믿음 점수 평균', '4점 이상 비율']];
+  Object.keys(byRef).sort().forEach(function (k) {
+    const g = byRef[k];
+    const top = Object.keys(g.q).sort(function (a, b) { return g.q[b] - g.q[a]; })[0];
+    perQ.push([k, top, g.n, avg_(g.sc), ratio_(g.sc)]);
+  });
+  perQ.splice(1, perQ.length - 1, ...perQ.slice(1).sort(function (a, b) { return (Number(b[3]) || 0) - (Number(a[3]) || 0); }));
+
+  // 3) 대본에 없던 질문 (대본을 늘릴 때 참고)
+  const unk = {};
+  items.filter(function (x) { return x.kind === 'unknown' && x.q && x.q !== PII_SAVED; })
+    .forEach(function (x) { unk[x.q] = (unk[x.q] || 0) + 1; });
+  const newQ = [['질문', '횟수']].concat(Object.keys(unk).sort(function (a, b) { return unk[b] - unk[a]; }).map(function (q) { return [q, unk[q]]; }));
+
+  // 4) 반박한 말
+  const pushes = [['반', '학생이 한 반박']].concat(items.filter(function (x) { return x.kind === 'insist'; }).map(function (x) { return [x.cls, x.q]; }));
+
+  // 5) 느낀 점
+  const refl = [['반', '느낀 점']].concat(reflects.filter(function (r) { return r[1] && r[1] !== PII_SAVED; }));
+
+  writeSheet_(ss, '요약', summary);
+  writeSheet_(ss, '질문별', perQ);
+  writeSheet_(ss, '새 질문', newQ);
+  writeSheet_(ss, '반박', pushes);
+  writeSheet_(ss, '느낀 점', refl);
+  return ss.getUrl();
+}
+
+function avg_(a) { return a.length ? Math.round(a.reduce(function (s, x) { return s + x; }, 0) / a.length * 100) / 100 : ''; }
+function ratio_(a) { return a.length ? Math.round(a.filter(function (x) { return x >= 4; }).length / a.length * 100) + '%' : ''; }
+
+function writeSheet_(ss, name, data) {
+  const sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  sh.clearContents();
+  if (data.length) sh.getRange(1, 1, data.length, data[0].length).setValues(data);
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, data[0].length).setFontWeight('bold');
+}
+
+/** 기록 모두 지우기 (분석이 끝나면 실행) */
+function clearLogs() {
+  const sh = sheet_();
+  if (sh.getLastRow() > 1) sh.deleteRows(2, sh.getLastRow() - 1);
+  const ss = sh.getParent();
+  ['요약', '질문별', '새 질문', '반박', '느낀 점'].forEach(function (n) {
+    const s = ss.getSheetByName(n); if (s) ss.deleteSheet(s);
+  });
+}
+
 /* ---------- 교사 조작 ---------- */
 function admin_(body) {
   const sp = PropertiesService.getScriptProperties();
@@ -121,13 +267,22 @@ function admin_(body) {
   if (!pin || String(body.pin) !== pin) { Utilities.sleep(800); return { error: 'pin' }; }
   const set = body.set || {};
   const allowed = {
-    CLASS_OPEN: ['yes', 'no'], MODE: ['subtle', 'opposite'], REVEALED: ['yes', 'no']
+    CLASS_OPEN: ['yes', 'no'], MODE: ['subtle', 'opposite'], REVEALED: ['yes', 'no'],
+    LLM: ['on', 'off'], LOGGING: ['on', 'off']
   };
   Object.keys(set).forEach(function (k) {
     if (allowed[k] && allowed[k].indexOf(set[k]) >= 0) sp.setProperty(k, set[k]);
+    if (k === 'CLASS_CODE' && /^[0-9A-Za-z가-힣-]{0,10}$/.test(String(set[k]))) sp.setProperty(k, String(set[k]));
   });
+  const out = { ok: true };
+  if (body.op === 'analyze') out.sheetUrl = analyze();
+  if (body.op === 'clear') { clearLogs(); out.cleared = true; }
   const p = props_();
-  return { ok: true, open: p.CLASS_OPEN === 'yes', revealed: p.REVEALED === 'yes', mode: p.MODE, model: p.MODEL, hasKey: !!p.UPSTAGE_API_KEY };
+  out.open = p.CLASS_OPEN === 'yes'; out.revealed = p.REVEALED === 'yes'; out.mode = p.MODE;
+  out.llm = p.LLM === 'on'; out.logging = p.LOGGING === 'on'; out.classCode = p.CLASS_CODE;
+  out.hasKey = !!p.UPSTAGE_API_KEY; out.rows = Math.max(0, sheet_().getLastRow() - 1);
+  if (!out.sheetUrl) out.sheetUrl = sheet_().getParent().getUrl();
+  return out;
 }
 
 /* ---------- 도우미 ---------- */
@@ -140,7 +295,7 @@ function callUpstage_(p, messages, temperature) {
     payload: JSON.stringify({ model: p.MODEL, messages: messages, temperature: temperature, max_tokens: 400 }),
     muteHttpExceptions: true
   });
-  if (res.getResponseCode() !== 200) { console.warn('Upstage ' + res.getResponseCode()); return null; } // 내용은 기록하지 않음
+  if (res.getResponseCode() !== 200) { console.warn('Upstage ' + res.getResponseCode()); return null; } // 내용은 로그에 남기지 않음
   const data = JSON.parse(res.getContentText());
   return data.choices && data.choices[0] ? String(data.choices[0].message.content).trim() : null;
 }
@@ -152,22 +307,43 @@ function clean_(messages) {
     .map(function (m) { return { role: m.role, content: m.content.slice(0, 300) }; });
 }
 
-function underLimit_(p) {
+function underLimit_(name, limit) {
   const cache = CacheService.getScriptCache();
-  const key = 'n_' + Math.floor(Date.now() / 60000);
+  const key = name + '_' + Math.floor(Date.now() / 60000);
   const lock = LockService.getScriptLock();
   lock.waitLock(3000);
   try {
     const n = Number(cache.get(key) || 0) + 1;
     cache.put(key, String(n), 120);
-    return n <= Number(p.RATE_PER_MIN || 60);
+    return n <= Number(limit || 60);
   } finally { lock.releaseLock(); }
+}
+
+function sheet_() {
+  const sp = PropertiesService.getScriptProperties();
+  let id = sp.getProperty('SHEET_ID');
+  let ss = null;
+  if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
+  if (!ss) {
+    ss = SpreadsheetApp.create('Logi AI 수업 기록 (익명)');
+    sp.setProperty('SHEET_ID', ss.getId());
+  }
+  let sh = ss.getSheetByName(LOG_SHEET);
+  if (!sh) {
+    sh = ss.getSheets()[0];
+    sh.setName(LOG_SHEET);
+  }
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(HEADERS);
+    sh.setFrozenRows(1);
+  }
+  return sh;
 }
 
 function props_() {
   const all = PropertiesService.getScriptProperties().getProperties();
   const out = {};
-  Object.keys(DEFAULTS).forEach(function (k) { out[k] = all[k] || DEFAULTS[k]; });
+  Object.keys(DEFAULTS).forEach(function (k) { out[k] = all[k] !== undefined && all[k] !== null ? all[k] : DEFAULTS[k]; });
   out.UPSTAGE_API_KEY = all.UPSTAGE_API_KEY || '';
   return out;
 }
@@ -176,12 +352,12 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-/** 처음 한 번 실행: 기본값 채우기 (키와 PIN은 직접 넣기) */
+/** 처음 한 번 실행: 기본값과 기록용 시트 만들기 (PIN과 키는 직접 넣기) */
 function setup() {
   const sp = PropertiesService.getScriptProperties();
-  Object.keys(DEFAULTS).forEach(function (k) { if (!sp.getProperty(k)) sp.setProperty(k, DEFAULTS[k]); });
+  Object.keys(DEFAULTS).forEach(function (k) { if (sp.getProperty(k) === null) sp.setProperty(k, DEFAULTS[k]); });
+  console.log('기록용 시트: ' + sheet_().getParent().getUrl());
   if (!sp.getProperty('TEACHER_PIN')) console.log('스크립트 속성에 TEACHER_PIN을 넣어 주세요.');
-  if (!sp.getProperty('UPSTAGE_API_KEY')) console.log('스크립트 속성에 UPSTAGE_API_KEY를 넣어 주세요.');
 }
 
 /** 연결 시험: 편집기에서 실행하면 로그에 답이 찍힌다 */
