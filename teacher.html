@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logi AI · 교사 화면</title>
+<style>
+  body{margin:0;font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;background:#f5f6fb;color:#1d2033}
+  .wrap{max-width:520px;margin:0 auto;padding:24px 18px}
+  h1{font-size:22px;margin:0 0 4px}
+  p.sub{color:#646a86;margin:0 0 18px;font-size:14px}
+  .card{background:#fff;border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 4px 20px rgba(40,40,120,.06)}
+  label{display:block;font-size:13px;color:#646a86;margin:8px 0 4px}
+  input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #e3e5f0;border-radius:10px;font-size:15px}
+  button{font:inherit;border:0;border-radius:12px;padding:12px;font-weight:700;cursor:pointer}
+  .row{display:flex;gap:8px;margin-top:10px}
+  .row button{flex:1}
+  .pri{background:#5b5bf0;color:#fff}
+  .sec{background:#eef0f7;color:#1d2033}
+  .red{background:#e5484d;color:#fff;width:100%;padding:16px;font-size:17px}
+  .state{display:flex;gap:8px;flex-wrap:wrap}
+  .pill{padding:6px 12px;border-radius:999px;font-size:13px;font-weight:700;background:#eef0f7}
+  .pill.on{background:#eafaf0;color:#12a150}
+  .pill.warn{background:#fff1f1;color:#e5484d}
+  #msg{font-size:13px;color:#e5484d;min-height:18px;margin-top:8px}
+  .hint{font-size:12px;color:#646a86;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Logi AI 교사 화면</h1>
+  <p class="sub">Upstage 모드에서만 씁니다. 대본 모드는 학생 화면 아래 '선생님 확인'에 코드를 넣어 공개해요.</p>
+
+  <div class="card">
+    <label>앱스 스크립트 웹앱 주소</label>
+    <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+    <label>교사 PIN</label>
+    <input id="pin" type="password" inputmode="numeric">
+    <div class="row"><button class="pri" id="connect">연결</button></div>
+    <div id="msg"></div>
+    <p class="hint">PIN은 이 창에만 잠시 보관되고 저장되지 않아요.</p>
+  </div>
+
+  <div class="card">
+    <div class="state" id="state"><span class="pill">연결 전</span></div>
+    <div class="row">
+      <button class="sec" data-set='{"CLASS_OPEN":"yes"}'>수업 열기</button>
+      <button class="sec" data-set='{"CLASS_OPEN":"no"}'>수업 닫기</button>
+    </div>
+    <div class="row">
+      <button class="sec" data-set='{"MODE":"subtle"}'>그럴듯한 오류 모드</button>
+      <button class="sec" data-set='{"MODE":"opposite"}'>반대 모드</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="red" data-set='{"REVEALED":"yes"}'>🎭 정체 공개</button>
+    <div class="row"><button class="sec" data-set='{"REVEALED":"no"}'>공개 취소 (다음 반 준비)</button></div>
+    <p class="hint">공개하면 5초 안에 모든 학생 화면이 공개 화면으로 바뀌고, 학생이 받은 답 옆에 실제 사실이 표시돼요.<br>
+    수업이 끝나면 '수업 닫기'를 꼭 눌러 주세요.</p>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+let URL_ = '', PIN = '';
+
+async function admin(set){
+  if (!URL_){ $('#msg').textContent = '먼저 연결해 주세요.'; return; }
+  $('#msg').textContent = '';
+  try{
+    const res = await fetch(URL_, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:'admin', pin: PIN, set})});
+    const s = await res.json();
+    if (s.error === 'pin'){ $('#msg').textContent = 'PIN이 맞지 않아요.'; return; }
+    render(s);
+  }catch(e){ $('#msg').textContent = '연결할 수 없어요. 주소와 배포 설정(액세스: 모든 사용자)을 확인해 주세요.'; }
+}
+function render(s){
+  $('#state').innerHTML =
+    `<span class="pill ${s.open?'on':''}">${s.open?'수업 열림':'수업 닫힘'}</span>`+
+    `<span class="pill">${s.mode==='opposite'?'반대 모드':'그럴듯한 오류 모드'}</span>`+
+    `<span class="pill ${s.revealed?'warn':''}">${s.revealed?'정체 공개됨':'공개 전'}</span>`+
+    `<span class="pill ${s.hasKey?'on':'warn'}">${s.hasKey?'API 키 있음':'API 키 없음'}</span>`;
+}
+$('#connect').onclick = () => { URL_ = $('#url').value.trim(); PIN = $('#pin').value; admin({}); };
+document.querySelectorAll('[data-set]').forEach(b => b.onclick = () => {
+  const set = JSON.parse(b.dataset.set);
+  if (set.REVEALED === 'yes' && !confirm('모든 학생 화면에 정체를 공개할까요?')) return;
+  admin(set);
+});
+</script>
+</body>
+</html>
